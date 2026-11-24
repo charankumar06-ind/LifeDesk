@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+backend/.venv/
+backend/*.db
+backend/*.db-wal
+backend/*.db-shm
+backend/*.log
+
+# Node
+node_modules/
+frontend/dist/
+frontend/*.log
+
+# Editor / OS
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+
+# Local tooling / chat artifacts
+.freebuff/
+.cloud-attachments/
+screenshot-*.png
