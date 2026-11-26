@@ -543,6 +543,7 @@ const actionTone: Record<string, BadgeTone> = {
   done: "sage",
   connected: "sage",
   not_configured: "neutral",
+  fallback: "brass",
   error: "clay",
   warning: "brass",
   critical: "clay",
@@ -555,6 +556,7 @@ const actionLabel: Record<string, string> = {
   pending_approval: "Awaiting approval",
   in_progress: "In progress",
   not_configured: "Not configured",
+  fallback: "Fallback",
   rejected: "Rejected",
 };
 

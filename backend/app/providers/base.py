@@ -12,7 +12,17 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import Literal
 
-from ..domain import Event, EventCreate, EventUpdate, Reminder, ReminderCreate, Task, TaskCreate, TaskUpdate
+from ..domain import (
+    EmailMessage,
+    Event,
+    EventCreate,
+    EventUpdate,
+    Reminder,
+    ReminderCreate,
+    Task,
+    TaskCreate,
+    TaskUpdate,
+)
 
 
 class ProviderError(RuntimeError):
@@ -94,3 +104,16 @@ class ReminderProvider(ABC):
 
     @abstractmethod
     def dismiss_reminder(self, reminder_id: str) -> Reminder: ...
+
+
+class MailProvider(ABC):
+    """Outbound email boundary.
+
+    Local mode never pretends to deliver mail; MCP mode delegates to the
+    server's `mail_send` tool, which owns SMTP credentials and transport.
+    """
+
+    info: ProviderInfo
+
+    @abstractmethod
+    def send_email(self, message: EmailMessage) -> dict: ...

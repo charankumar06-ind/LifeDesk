@@ -1,5 +1,5 @@
 import { useRef, useState, type KeyboardEvent } from "react";
-import { Link } from "react-router-dom";
+import { Link, useLocation } from "react-router-dom";
 import { ArrowUpRight, CornerDownLeft, Cpu, ShieldCheck, Sparkles, TerminalSquare } from "lucide-react";
 import { api } from "../lib/api";
 import { cn } from "../lib/cn";
@@ -19,6 +19,9 @@ const EXAMPLES = [
   { label: "Show pending tasks", command: "Show pending tasks" },
   { label: "Study session", command: "Schedule a two-hour Python study session" },
   { label: "Create a reminder", command: "Remind me to submit the course form at 17:00" },
+  { label: "Daily briefing", command: "Give me my daily briefing" },
+  { label: "Find free time", command: "Find a free 90-minute slot tomorrow" },
+  { label: "Send an email", command: "Send mail to vishnuvardhan7219@gmail.com saying HI" },
 ];
 
 const STEPS = [
@@ -28,7 +31,10 @@ const STEPS = [
 ];
 
 export default function CommandCenter() {
-  const [command, setCommand] = useState("");
+  const location = useLocation();
+  const [command, setCommand] = useState(
+    () => (location.state as { command?: string } | null)?.command ?? "",
+  );
   const [workflow, setWorkflow] = useState<Workflow | null>(null);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);

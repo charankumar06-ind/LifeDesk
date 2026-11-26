@@ -9,12 +9,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta
 from typing import Any
 
 from ..db import get_db
-from ..domain import EventCreate, ReminderCreate, Task, TaskCreate, Workflow, WorkflowAction
+from ..domain import EmailMessage, EventCreate, ReminderCreate, Task, TaskCreate, Workflow, WorkflowAction
 from ..providers.base import ProviderError
 from ..providers.registry import get_services
 from ..utils import as_date, day_window, dumps, fmt_time, iso, loads, new_id, now, parse_dt
@@ -410,6 +411,53 @@ def study_proposal(*, interpretation: IntentResult, day: date, settings: dict) -
     )
 
 
+def email_proposal(*, interpretation: IntentResult) -> Proposal:
+    entities = interpretation.entities
+    message = EmailMessage(
+        to=entities.get("to") or [],
+        subject=str(entities.get("subject") or "Message from LifeDesk"),
+        body=str(entities.get("body") or "Hi"),
+    )
+    payload = message.model_dump(mode="json")
+    recipients = ", ".join(message.to)
+    action = _action(
+        action_type="send_email",
+        provider="mail",
+        title=f"Email {message.subject}",
+        description=f"Send '{message.subject}' to {recipients} through the mail provider.",
+        payload=payload,
+        preview={
+            "change": "send",
+            "entity": "email",
+            "summary": f"Email · {message.subject} · to {recipients}",
+            "before": None,
+            "after": payload,
+        },
+    )
+    steps = _base_steps(interpretation) + [
+        _step(
+            "compose",
+            "Compose email",
+            f"Recipient {recipients} · subject '{message.subject}' · {len(message.body)} body character(s).",
+        ),
+        _step(
+            "propose",
+            "Propose changes",
+            "1 email action awaiting approval. Nothing has been sent.",
+            status="awaiting_approval",
+        ),
+    ]
+    return Proposal(
+        summary=(
+            f"Email '{message.subject}' to {recipients} proposed. Nothing is sent until you "
+            "approve and execute it."
+        ),
+        steps=steps,
+        actions=[action],
+        preview={"email": payload},
+    )
+
+
 def reminder_proposal(*, interpretation: IntentResult, settings: dict) -> Proposal:
     entities = interpretation.entities
     title = str(entities.get("title") or "Reminder")
@@ -553,6 +601,333 @@ def pending_tasks_proposal(*, interpretation: IntentResult) -> Proposal:
     )
 
 
+def _normalise_title(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", value.lower()).strip()
+
+
+def _match_by_title(items, query: str):
+    """Match a free-text title to one item; return (match, candidates)."""
+    needle = _normalise_title(query)
+    if not needle:
+        return None, []
+    exact = [item for item in items if _normalise_title(item.title) == needle]
+    if exact:
+        return exact[0], exact
+    partial = [item for item in items if needle in _normalise_title(item.title)]
+    if len(partial) == 1:
+        return partial[0], partial
+    if partial:
+        return None, partial
+    tokens = [token for token in needle.split() if len(token) > 2]
+    if not tokens:
+        return None, []
+    scored: list[tuple[int, object]] = []
+    for item in items:
+        haystack = _normalise_title(item.title)
+        score = sum(1 for token in tokens if token in haystack)
+        if score:
+            scored.append((score, item))
+    if not scored:
+        return None, []
+    best = max(score for score, _ in scored)
+    top = [item for score, item in scored if score == best]
+    if best >= max(1, (len(tokens) + 1) // 2) and len(top) == 1:
+        return top[0], top
+    return None, top
+
+
+def _merge_busy(events, start: datetime, end: datetime) -> list[tuple[datetime, datetime]]:
+    intervals = sorted(
+        (max(event.start_at, start), min(event.end_at, end))
+        for event in events
+        if event.start_at < end and event.end_at > start
+    )
+    merged: list[tuple[datetime, datetime]] = []
+    for interval_start, interval_end in intervals:
+        if interval_start >= interval_end:
+            continue
+        if merged and interval_start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], interval_end))
+        else:
+            merged.append((interval_start, interval_end))
+    return merged
+
+
+def _free_gaps(events, start: datetime, end: datetime) -> list[tuple[datetime, datetime]]:
+    gaps: list[tuple[datetime, datetime]] = []
+    cursor = start
+    for busy_start, busy_end in _merge_busy(events, start, end):
+        if busy_start > cursor:
+            gaps.append((cursor, busy_start))
+        cursor = max(cursor, busy_end)
+    if cursor < end:
+        gaps.append((cursor, end))
+    return [gap for gap in gaps if gap[1] > gap[0]]
+
+
+def _title_miss(*, kind: str, query: str, candidates, steps: list[dict], time_format: str) -> Proposal:
+    names = ", ".join(item.title for item in candidates[:5]) if candidates else ""
+    if not query:
+        error = f"Say which {kind} to match, for example: '{kind} {candidates[0].title}'." if candidates else f"No {kind} was found."
+    elif candidates:
+        error = f"'{query}' matches more than one {kind}: {names}. Use a more specific title."
+    else:
+        error = f"No open {kind} matches '{query}'. Nothing was changed."
+    return Proposal(
+        summary=f"Could not match a {kind} — nothing was changed.",
+        steps=steps + [_step("propose", "Propose changes", error, status="failed")],
+        status="failed",
+        error=error,
+    )
+
+
+def daily_briefing_proposal(*, interpretation: IntentResult, day: date, settings: dict) -> Proposal:
+    services = get_services()
+    time_format = _settings_fmt(settings)
+    start, end = day_window(day, str(settings["day_start"]), str(settings["day_end"]))
+    events = services.calendar.list_events(start, end)
+    tasks = services.tasks.list_tasks(status="open")
+    reminders = services.reminders.list_reminders(status="pending")
+    current = now()
+    overdue = [task for task in tasks if task.due_at and task.due_at < current]
+    next_event = next((event for event in events if event.end_at >= current), None)
+    if next_event is None and events:
+        next_event = events[0]
+
+    counts = {
+        "events": len(events),
+        "open_tasks": len(tasks),
+        "overdue_tasks": len(overdue),
+        "pending_reminders": len(reminders),
+    }
+    summary = (
+        f"{counts['events']} event(s), {counts['open_tasks']} open task(s) "
+        f"({counts['overdue_tasks']} overdue) and {counts['pending_reminders']} pending "
+        f"reminder(s) for {day.strftime('%d %b')}. Read-only — nothing was modified."
+    )
+    steps = _base_steps(interpretation) + [
+        _read_step("Read calendar", f"{len(events)} event(s) between {fmt_time(start, time_format)} and {fmt_time(end, time_format)}.", services.calendar.info.key),
+        _read_step("Read tasks", f"{len(tasks)} open task(s) from {services.tasks.info.label}.", services.tasks.info.key),
+        _read_step("Read reminders", f"{len(reminders)} pending reminder(s).", services.reminders.info.key),
+        _step("report", "Report", "Read-only briefing: no actions proposed, no data modified.", status="completed"),
+    ]
+    return Proposal(
+        summary=summary,
+        steps=steps,
+        actions=[],
+        result={
+            "date": day.isoformat(),
+            "counts": counts,
+            "events": [event.model_dump(mode="json") for event in events],
+            "open_tasks": [task.model_dump(mode="json") for task in tasks],
+            "overdue_tasks": [task.model_dump(mode="json") for task in overdue],
+            "reminders": [reminder.model_dump(mode="json") for reminder in reminders],
+            "next_event": next_event.model_dump(mode="json") if next_event else None,
+        },
+        status="completed",
+        read_only=True,
+        activity={
+            "provider_type": "calendar",
+            "provider_name": services.calendar.info.key,
+            "operation": "daily_briefing",
+            "status": "success",
+            "message": summary,
+            "detail": {"date": day.isoformat(), **counts},
+        },
+    )
+
+
+def weekly_review_proposal(*, interpretation: IntentResult, settings: dict) -> Proposal:
+    services = get_services()
+    end = now()
+    start = end - timedelta(days=7)
+    events = services.calendar.list_events(start, end)
+    all_tasks = services.tasks.list_tasks()
+    completed = [
+        task for task in all_tasks
+        if task.completed_at and start <= task.completed_at <= end
+    ]
+    created = [task for task in all_tasks if start <= task.created_at <= end]
+    open_tasks = [task for task in all_tasks if task.status != "done"]
+    reminders = services.reminders.list_reminders(status="pending")
+    busy_minutes = sum(int((event.end_at - event.start_at).total_seconds() // 60) for event in events)
+    days = []
+    for offset in range(6, -1, -1):
+        value = end.date() - timedelta(days=offset)
+        days.append(
+            {
+                "date": value.isoformat(),
+                "label": value.strftime("%a"),
+                "completed": sum(1 for task in completed if task.completed_at and task.completed_at.date() == value),
+            }
+        )
+    counts = {
+        "events": len(events),
+        "busy_minutes": busy_minutes,
+        "tasks_completed": len(completed),
+        "tasks_created": len(created),
+        "open_tasks": len(open_tasks),
+        "pending_reminders": len(reminders),
+    }
+    summary = (
+        f"Last 7 days: {counts['tasks_completed']} task(s) completed, "
+        f"{counts['tasks_created']} created, {counts['events']} event(s) "
+        f"({busy_minutes} busy minutes). {counts['open_tasks']} task(s) still open. "
+        "Read-only — nothing was modified."
+    )
+    steps = _base_steps(interpretation) + [
+        _read_step("Read calendar", f"{len(events)} event(s) in the last seven days.", services.calendar.info.key),
+        _read_step("Read tasks", f"{len(all_tasks)} task(s) scanned for completions and open work.", services.tasks.info.key),
+        _step("report", "Report", "Read-only weekly recap: no actions proposed.", status="completed"),
+    ]
+    return Proposal(
+        summary=summary,
+        steps=steps,
+        actions=[],
+        result={
+            "window": {"start_at": iso(start), "end_at": iso(end)},
+            "counts": counts,
+            "completed_tasks": [task.model_dump(mode="json") for task in completed],
+            "open_tasks": [task.model_dump(mode="json") for task in open_tasks],
+            "events": [event.model_dump(mode="json") for event in events],
+            "daily_completions": days,
+        },
+        status="completed",
+        read_only=True,
+        activity={
+            "provider_type": "workflow",
+            "provider_name": "local-workflow-engine",
+            "operation": "weekly_review",
+            "status": "success",
+            "message": summary,
+            "detail": counts,
+        },
+    )
+
+
+def free_time_proposal(*, interpretation: IntentResult, day: date, settings: dict) -> Proposal:
+    services = get_services()
+    time_format = _settings_fmt(settings)
+    start, end = day_window(day, str(settings["day_start"]), str(settings["day_end"]))
+    events = services.calendar.list_events(start, end)
+    minutes = max(15, int(interpretation.entities.get("minutes") or 60))
+    gaps = _free_gaps(events, start, end)
+    matching = [
+        (gap_start, gap_end)
+        for gap_start, gap_end in gaps
+        if int((gap_end - gap_start).total_seconds() // 60) >= minutes
+    ]
+    gap_rows = [
+        {
+            "start_at": iso(gap_start),
+            "end_at": iso(gap_end),
+            "minutes": int((gap_end - gap_start).total_seconds() // 60),
+            "display": f"{fmt_time(gap_start, time_format)}–{fmt_time(gap_end, time_format)}",
+        }
+        for gap_start, gap_end in matching
+    ]
+    summary = (
+        f"{len(gap_rows)} free slot(s) of at least {minutes} minute(s) on "
+        f"{day.strftime('%d %b')} between {fmt_time(start, time_format)} and "
+        f"{fmt_time(end, time_format)}. Read-only — nothing was booked."
+    )
+    steps = _base_steps(interpretation) + [
+        _read_step("Read calendar", f"{len(events)} event(s) on {day.isoformat()}.", services.calendar.info.key),
+        _step("gaps", "Find gaps", f"{len(gaps)} gap(s) found; {len(gap_rows)} fit {minutes} minute(s)."),
+        _step("report", "Report", "Read-only free-time search: no actions proposed.", status="completed"),
+    ]
+    return Proposal(
+        summary=summary,
+        steps=steps,
+        actions=[],
+        result={
+            "date": day.isoformat(),
+            "required_minutes": minutes,
+            "window": {"start_at": iso(start), "end_at": iso(end)},
+            "gaps": gap_rows,
+            "count": len(gap_rows),
+        },
+        status="completed",
+        read_only=True,
+        activity={
+            "provider_type": "calendar",
+            "provider_name": services.calendar.info.key,
+            "operation": "find_free_time",
+            "status": "success",
+            "message": summary,
+            "detail": {"date": day.isoformat(), "required_minutes": minutes, "gaps": len(gap_rows)},
+        },
+    )
+
+
+def complete_task_proposal(*, interpretation: IntentResult) -> Proposal:
+    services = get_services()
+    query = str(interpretation.entities.get("title") or "")
+    tasks = services.tasks.list_tasks(status="open")
+    match, candidates = _match_by_title(tasks, query)
+    steps = _base_steps(interpretation) + [
+        _read_step("Read tasks", f"{len(tasks)} open task(s) from {services.tasks.info.label}.", services.tasks.info.key),
+    ]
+    if match is None:
+        return _title_miss(kind="task", query=query, candidates=candidates, steps=steps, time_format="24h")
+    payload = {"task_id": match.id, "update": {"status": "done"}}
+    action = _action(
+        action_type="complete_task",
+        provider="task",
+        title=f"Complete task: {match.title}",
+        description="Mark the matched task as done.",
+        payload=payload,
+        preview={
+            "change": "update",
+            "entity": "task",
+            "summary": f"Task · {match.title} · open → done",
+            "before": {"status": match.status, "title": match.title},
+            "after": {"status": "done", "title": match.title},
+        },
+    )
+    steps.append(_step("propose", "Propose changes", "1 task action awaiting approval. No data written.", status="awaiting_approval"))
+    return Proposal(
+        summary=f"Task '{match.title}' proposed to be marked done. Nothing changes until you approve and execute.",
+        steps=steps,
+        actions=[action],
+        preview={"task": payload},
+    )
+
+
+def dismiss_reminder_proposal(*, interpretation: IntentResult) -> Proposal:
+    services = get_services()
+    query = str(interpretation.entities.get("title") or "")
+    reminders = services.reminders.list_reminders(status="pending")
+    match, candidates = _match_by_title(reminders, query)
+    steps = _base_steps(interpretation) + [
+        _read_step("Read reminders", f"{len(reminders)} pending reminder(s).", services.reminders.info.key),
+    ]
+    if match is None:
+        return _title_miss(kind="reminder", query=query, candidates=candidates, steps=steps, time_format="24h")
+    payload = {"reminder_id": match.id}
+    action = _action(
+        action_type="dismiss_reminder",
+        provider="reminder",
+        title=f"Dismiss reminder: {match.title}",
+        description="Mark the matched reminder as dismissed.",
+        payload=payload,
+        preview={
+            "change": "update",
+            "entity": "reminder",
+            "summary": f"Reminder · {match.title} · pending → dismissed",
+            "before": {"status": match.status, "title": match.title},
+            "after": {"status": "dismissed", "title": match.title},
+        },
+    )
+    steps.append(_step("propose", "Propose changes", "1 reminder action awaiting approval.", status="awaiting_approval"))
+    return Proposal(
+        summary=f"Reminder '{match.title}' proposed to be dismissed. Nothing changes until you approve and execute.",
+        steps=steps,
+        actions=[action],
+        preview={"reminder": payload},
+    )
+
+
 def unsupported_proposal(*, interpretation: IntentResult) -> Proposal:
     steps = [
         _step("interpret", "Interpret command", interpretation.explanation, status="failed", provider="deterministic-interpreter"),
@@ -568,7 +943,7 @@ def unsupported_proposal(*, interpretation: IntentResult) -> Proposal:
             "provider_name": "deterministic-interpreter",
             "operation": "interpret_command",
             "status": "failed",
-            "message": "Unsupported command. Supported intents: plan my day, pending tasks, study session, reminder, meeting, task.",
+            "message": "Unsupported command. Supported intents: plan my day, pending tasks, study session, reminder create/dismiss, meeting, task create/complete, daily briefing, weekly review, free time, email.",
             "detail": {"command": interpretation.explanation},
         },
     )
@@ -599,12 +974,24 @@ def run_command(command: str) -> Workflow:
         proposal = pending_tasks_proposal(interpretation=interpretation)
     elif interpretation.intent == "schedule_study":
         proposal = study_proposal(interpretation=interpretation, day=day, settings=settings)
+    elif interpretation.intent == "send_email":
+        proposal = email_proposal(interpretation=interpretation)
     elif interpretation.intent == "create_reminder":
         proposal = reminder_proposal(interpretation=interpretation, settings=settings)
     elif interpretation.intent == "schedule_event":
         proposal = event_proposal(interpretation=interpretation, day=day, settings=settings)
     elif interpretation.intent == "create_task":
         proposal = task_proposal(interpretation=interpretation, settings=settings)
+    elif interpretation.intent == "complete_task":
+        proposal = complete_task_proposal(interpretation=interpretation)
+    elif interpretation.intent == "dismiss_reminder":
+        proposal = dismiss_reminder_proposal(interpretation=interpretation)
+    elif interpretation.intent == "daily_briefing":
+        proposal = daily_briefing_proposal(interpretation=interpretation, day=day, settings=settings)
+    elif interpretation.intent == "weekly_review":
+        proposal = weekly_review_proposal(interpretation=interpretation, settings=settings)
+    elif interpretation.intent == "find_free_time":
+        proposal = free_time_proposal(interpretation=interpretation, day=day, settings=settings)
     else:  # pragma: no cover - defensive
         proposal = unsupported_proposal(interpretation=interpretation)
 

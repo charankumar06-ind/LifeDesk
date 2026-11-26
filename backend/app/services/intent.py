@@ -31,6 +31,12 @@ INTENT_LABELS = {
     "create_reminder": "Create a reminder",
     "schedule_event": "Schedule a meeting",
     "create_task": "Create a task",
+    "complete_task": "Complete a task",
+    "dismiss_reminder": "Dismiss a reminder",
+    "daily_briefing": "Daily briefing",
+    "weekly_review": "Weekly review",
+    "find_free_time": "Find free time",
+    "send_email": "Send an email",
     "unsupported": "Unsupported request",
 }
 
@@ -47,6 +53,9 @@ class IntentResult:
     warnings: list[str] = field(default_factory=list)
 
 
+EMAIL_ADDRESS = re.compile(r"\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}\b")
+
+
 def _normalise(command: str) -> str:
     return re.sub(r"\s+", " ", command.strip().lower())
 
@@ -58,7 +67,7 @@ def extract_duration_minutes(text: str) -> int | None:
     word = re.search(r"(one|two|three|four|five|six|seven|eight|nine|ten)\s*[- ]?\s*(?:hours?|hrs?)", text)
     if word:
         return NUMBER_WORDS[word.group(1)] * 60
-    minutes = re.search(r"(\d+)\s*(?:minutes?|mins?)\b", text)
+    minutes = re.search(r"(\d+)\s*[- ]?\s*(?:minutes?|mins?)\b", text)
     if minutes:
         return int(minutes.group(1))
     return None
@@ -177,6 +186,179 @@ def parse_command(command: str) -> IntentResult:
             matched_rule="plan_day / 'plan my day'",
         )
 
+    # --- daily briefing ----------------------------------------------------
+    if (
+        re.search(r"\b(daily|morning|today'?s)\s+(briefing|brief|summary|agenda)\b", text)
+        or re.search(r"\bbrief\s+me\b", text)
+        or re.search(r"what(?:'s| is)\s+(?:on|happening)\s+(?:today|my plate)\b", text)
+        or re.search(r"\bwhat\s+do\s+i\s+have\s+(?:today|on)\b", text)
+        or re.search(r"\bmy\s+day\s+at\s+a\s+glance\b", text)
+    ):
+        return IntentResult(
+            intent="daily_briefing",
+            label=INTENT_LABELS["daily_briefing"],
+            supported=True,
+            confidence=0.95,
+            entities={"date": target_date.isoformat()},
+            explanation=(
+                "Matched the daily-briefing rule. LifeDesk will read today's calendar, open tasks "
+                "and pending reminders, then return a read-only summary. Nothing is written."
+            ),
+            matched_rule="daily_briefing / 'brief me'",
+        )
+
+    # --- weekly review -----------------------------------------------------
+    if (
+        re.search(r"\bweekly\s+(review|summary|recap|report)\b", text)
+        or re.search(r"\breview\s+(?:my|the|this)\s+week\b", text)
+        or "week in review" in text
+        or re.search(r"\bhow\s+(?:was|did)\s+(?:my|the)\s+week\b", text)
+    ):
+        return IntentResult(
+            intent="weekly_review",
+            label=INTENT_LABELS["weekly_review"],
+            supported=True,
+            confidence=0.94,
+            entities={},
+            explanation=(
+                "Matched the weekly-review rule. LifeDesk will read the last seven days of calendar "
+                "events, task completions and pending work, then return a read-only recap."
+            ),
+            matched_rule="weekly_review / 'weekly review'",
+        )
+
+    # --- find free time ----------------------------------------------------
+    if (
+        re.search(r"\b(find|show|get|when)\b.*\b(free|available|open)\b.*\b(time|slot|gap|window)\b", text)
+        or re.search(r"\b(free\s+(time|slot|gap|window)|available\s+slot|open\s+slot)\b", text)
+        or re.search(r"\bwhen\s+am\s+i\s+free\b", text)
+        or re.search(r"\bfind\s+(?:me\s+)?(?:a\s+)?(?:\d+[ -]?(?:minutes?|mins?|hours?|hrs?)\s+)?(?:slot|gap)\b", text)
+    ):
+        return IntentResult(
+            intent="find_free_time",
+            label=INTENT_LABELS["find_free_time"],
+            supported=True,
+            confidence=0.92,
+            entities={
+                "date": target_date.isoformat(),
+                "minutes": max(15, duration or 60),
+            },
+            explanation=(
+                "Matched the free-time rule. LifeDesk will read the calendar for the requested day "
+                "and report conflict-free gaps inside your working window. Nothing is written."
+            ),
+            matched_rule="find_free_time / 'find free time'",
+        )
+
+    # --- dismiss reminder (before reminder creation) -----------------------
+    if re.search(r"\b(dismiss|clear|close|cancel)\b.{0,25}\breminder\b", text) or (
+        "reminder" in text and re.search(r"\b(dismiss|clear|close|cancel)\b", text)
+    ):
+        raw = re.search(
+            r"\b(?:dismiss|clear|close|cancel)\s+(?:the\s+|my\s+|a\s+)?reminder"
+            r"(?:\s+(?:about|for|to|on))?\s*(.*)$",
+            text,
+        )
+        query = _clean_title(raw.group(1)) if raw and raw.group(1) else ""
+        return IntentResult(
+            intent="dismiss_reminder",
+            label=INTENT_LABELS["dismiss_reminder"],
+            supported=True,
+            confidence=0.9,
+            entities={"title": query},
+            explanation=(
+                "Matched the reminder-dismissal rule. LifeDesk will find the matching pending "
+                "reminder and propose dismissing it for approval."
+            ),
+            matched_rule="dismiss_reminder / 'dismiss reminder'",
+        )
+
+    # --- complete task -----------------------------------------------------
+    complete_match = re.search(
+        r"\b(?:complete|finish|close|mark)\s+(?:the\s+|my\s+|a\s+)?task\s+(.+?)"
+        r"(?:\s+(?:as\s+)?(?:done|complete))?$",
+        text,
+    )
+    if not complete_match:
+        complete_match = re.search(r"\bmark\s+(.+?)\s+(?:as\s+)?(?:done|complete)$", text)
+    if not complete_match:
+        complete_match = re.search(
+            r"\b(?:completed|finished)\s+(?:the\s+|my\s+|a\s+)?task\s+(.+)$", text
+        )
+    if complete_match:
+        query = _clean_title(complete_match.group(1).strip())
+        query = re.sub(r"\s+(?:as\s+)?(?:done|complete)$", "", query, flags=re.IGNORECASE).strip()
+        return IntentResult(
+            intent="complete_task",
+            label=INTENT_LABELS["complete_task"],
+            supported=True,
+            confidence=0.89,
+            entities={"title": query},
+            explanation=(
+                "Matched the task-completion rule. LifeDesk will match the task by title and "
+                "propose marking it done for approval."
+            ),
+            matched_rule="complete_task / 'complete task'",
+        )
+
+    # --- send email --------------------------------------------------------
+    if (
+        EMAIL_ADDRESS.search(command)
+        and "remind" not in text
+        and re.search(r"\b(?:send|write|compose|email|mail)\b", text)
+    ):
+        recipients: list[str] = []
+        for address in EMAIL_ADDRESS.findall(command):
+            if address not in recipients:
+                recipients.append(address)
+        first = EMAIL_ADDRESS.search(command)
+        rest = command[first.end():].strip(" .,:;-") if first else ""
+        body_match = re.search(
+            r"\b(?:saying|say|message(?:\s+is)?|body(?:\s+is)?|with\s+message)"
+            r"\b[:\s]*(.+)$",
+            rest,
+            re.IGNORECASE | re.DOTALL,
+        )
+        body = (body_match.group(1).strip(" \"'“”‘’") if body_match else "").strip()
+        subject_match = re.search(
+            r"\bsubject\b[:\s]+(.+?)(?:\s+\b(?:saying|message|body)\b.*)?$",
+            rest,
+            re.IGNORECASE | re.DOTALL,
+        )
+        about_match = re.search(
+            r"\babout\s+(.+?)(?:\s+\b(?:saying|message|body)\b.*)?$",
+            rest,
+            re.IGNORECASE | re.DOTALL,
+        )
+        if subject_match:
+            subject = subject_match.group(1).strip(" \"'“”‘’")
+        elif about_match:
+            subject = about_match.group(1).strip(" \"'“”‘’")
+        elif body:
+            subject = body.splitlines()[0][:120]
+        else:
+            subject = "Message from LifeDesk"
+        if not body:
+            body = "Hi"
+        if not subject:
+            subject = "Message from LifeDesk"
+        return IntentResult(
+            intent="send_email",
+            label=INTENT_LABELS["send_email"],
+            supported=True,
+            confidence=0.93,
+            entities={
+                "to": recipients,
+                "subject": subject[:200],
+                "body": body[:20000],
+            },
+            explanation=(
+                "Matched the email rule. One email will be proposed for approval; nothing "
+                "is sent until you approve and execute the workflow."
+            ),
+            matched_rule="send_email / 'send mail to <address>'",
+        )
+
     # --- reminders ---------------------------------------------------------
     if re.search(r"\bremind(?:er)?\b", text) or "remind me" in text:
         title = ""
@@ -291,8 +473,9 @@ def parse_command(command: str) -> IntentResult:
         confidence=0.2,
         explanation=(
             "No deterministic rule matched this request. The prototype supports: plan my day, "
-            "show pending tasks, schedule a study session, create a reminder, schedule a meeting, "
-            "and create a task. Nothing was executed."
+            "show pending tasks, schedule a study session, create or dismiss a reminder, schedule "
+            "a meeting, create or complete a task, daily briefing, weekly review, find free time, "
+            "and send an email. Nothing was executed."
         ),
         matched_rule="fallback",
     )

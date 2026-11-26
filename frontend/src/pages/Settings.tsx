@@ -1,8 +1,9 @@
 import { useEffect, useState } from "react";
-import { Cpu, Database, HardDrive, Save, ShieldCheck, SlidersHorizontal, UserRound } from "lucide-react";
+import { Cpu, Database, HardDrive, LogOut, Save, ShieldCheck, SlidersHorizontal, UserRound } from "lucide-react";
 import { api } from "../lib/api";
 import { useApi } from "../lib/useApi";
 import { useSettings } from "../components/SettingsProvider";
+import { useAuth } from "../components/AuthProvider";
 import { useToast } from "../components/Toast";
 import {
   Badge,
@@ -14,6 +15,7 @@ import {
   LoadingBlock,
   PageHeader,
   Select,
+  StatusBadge,
   TextInput,
 } from "../components/ui";
 import type { Settings } from "../lib/types";
@@ -27,6 +29,7 @@ export default function SettingsPage() {
   const settingsApi = useApi(() => api.settings(), []);
   const systemApi = useApi(() => api.system(), []);
   const { refresh } = useSettings();
+  const { user, status, logout } = useAuth();
   const toast = useToast();
   const [form, setForm] = useState<Settings | null>(null);
   const [saving, setSaving] = useState(false);
@@ -70,6 +73,7 @@ export default function SettingsPage() {
   };
 
   const system = systemApi.data;
+  const mcpDegraded = system?.provider_mode === "mcp" && system?.mcp?.status === "error";
 
   return (
     <div>
@@ -108,7 +112,7 @@ export default function SettingsPage() {
                       id="settings-name"
                       value={form.display_name}
                       onChange={(event) => update("display_name", event.target.value)}
-                      placeholder="Ari Mensah"
+                      placeholder="Your name"
                     />
                   </Field>
                   <Field label="Role" htmlFor="settings-role" hint="Used only for display.">
@@ -247,19 +251,56 @@ export default function SettingsPage() {
           </div>
 
           <div className="space-y-4">
+            <Card>
+              <CardHeader
+                eyebrow="Access & safety"
+                title="Protected session"
+                action={<ShieldCheck className="size-4 text-sage" />}
+              />
+              <div className="px-5 py-4">
+                <div className="flex flex-wrap items-center gap-2">
+                  <Badge tone="sage" dot>Signed in</Badge>
+                  <span className="font-mono text-[11.5px] text-bone-dim">@{user?.username ?? "owner"}</span>
+                </div>
+                <p className="mt-2 text-[11.5px] leading-relaxed text-muted">
+                  Every API route requires this session. The cookie is HttpOnly and SameSite=Lax;
+                  the server stores only its hash. Sessions expire after{" "}
+                  {status?.session_days ?? 7} day(s).
+                </p>
+                <div className="mt-3 flex items-center justify-between gap-2 border-t border-line-soft pt-3">
+                  <p className="text-[10.5px] text-muted">Writes still require workflow approval.</p>
+                  <Button
+                    size="sm"
+                    variant="secondary"
+                    icon={<LogOut className="size-3.5" />}
+                    onClick={() => void logout()}
+                  >
+                    Sign out
+                  </Button>
+                </div>
+              </div>
+            </Card>
+
             <Card className="border-brass/30 bg-brass/[0.03]">
               <div className="px-5 py-4">
                 <div className="flex items-center gap-2">
                   <ShieldCheck className="size-4 text-brass" />
-                  <span className="label-micro text-brass">Demo boundary</span>
+                  <span className="label-micro text-brass">Provider boundary</span>
                 </div>
-                <h2 className="serif mt-2 text-[22px] leading-tight text-bone">Demo Mode — Local Data</h2>
+                <h2 className="serif mt-2 text-[22px] leading-tight text-bone">
+                  {system?.demo_label ?? "Demo Mode — Local Data"}
+                </h2>
                 <p className="mt-2 text-[12px] leading-relaxed text-muted">
-                  This prototype runs entirely on your machine. No MCP servers, OAuth providers or paid
-                  LLM APIs are connected, and nothing sends your data anywhere.
+                  {mcpDegraded
+                    ? "An MCP call failed, so this provider is degraded. LifeDesk does not fall back to local storage: writes fail with HTTP 503 until a later MCP call succeeds."
+                    : system?.provider_mode === "mcp"
+                      ? "Reads and writes are routed through the configured MCP server. The approval gate still applies before every workflow write."
+                      : system?.provider_mode === "local-fallback"
+                      ? "MCP could not start, so LifeDesk stayed usable on local SQLite providers. No workflow writes were routed to MCP."
+                      : "This prototype runs entirely on your machine. No MCP servers, OAuth providers or paid LLM APIs are connected, and nothing sends your data anywhere."}
                 </p>
                 <ul className="mt-3 space-y-1.5 text-[11.5px] text-muted">
-                  <li className="flex gap-2"><span className="mt-1.5 size-1 rounded-full bg-brass/70" />SQLite calendar, task and reminder providers</li>
+                  <li className="flex gap-2"><span className={`mt-1.5 size-1 rounded-full ${mcpDegraded ? "bg-clay" : "bg-brass/70"}`} />{mcpDegraded ? `MCP ${system?.mcp?.transport.toUpperCase() ?? "MCP"} provider degraded · last call failed` : system?.provider_mode === "mcp" ? `MCP ${system?.mcp?.transport.toUpperCase() ?? "MCP"} provider · ${system?.mcp?.endpoint ?? "configured server"}` : system?.provider_mode === "local-fallback" ? "Local SQLite fallback providers" : "SQLite calendar, task and reminder providers"}</li>
                   <li className="flex gap-2"><span className="mt-1.5 size-1 rounded-full bg-brass/70" />Deterministic intent interpreter</li>
                   <li className="flex gap-2"><span className="mt-1.5 size-1 rounded-full bg-brass/70" />Approval gate before every write</li>
                 </ul>
@@ -279,9 +320,7 @@ export default function SettingsPage() {
                       <p className="text-[12.5px] text-bone-dim">{provider.label}</p>
                       <div className="flex items-center gap-1.5">
                         <Badge tone={provider.kind === "local" ? "sage" : "sky"}>{provider.kind}</Badge>
-                        <Badge tone={provider.status === "connected" ? "sage" : "neutral"} dot>
-                          {provider.status === "connected" ? "Connected" : "Not configured"}
-                        </Badge>
+                        <StatusBadge status={provider.status} />
                       </div>
                     </div>
                     <p className="mt-1 font-mono text-[10px] text-muted">
@@ -291,6 +330,11 @@ export default function SettingsPage() {
                   </div>
                 ))}
                 {!system && <div className="px-5 py-4 text-[12px] text-muted">Loading provider status…</div>}
+                {system?.mcp.error && (
+                  <p className="mx-5 my-3 rounded border border-clay/30 bg-clay/[0.06] px-3 py-2 font-mono text-[10.5px] leading-relaxed text-clay">
+                    {system.mcp.error}
+                  </p>
+                )}
               </div>
             </Card>
 
@@ -339,7 +383,7 @@ export default function SettingsPage() {
                         <p className="text-[12px] text-bone-dim">{integration.name}</p>
                         <p className="mt-0.5 text-[10.5px] leading-relaxed text-muted">{integration.detail}</p>
                       </div>
-                      <Badge tone="neutral">Not configured</Badge>
+                      <StatusBadge status={integration.status} />
                     </div>
                   ))}
                 </div>

@@ -96,5 +96,11 @@ def ai_status() -> dict[str, Any]:
             {"intent": "create_reminder", "example": "Remind me to submit the form at 17:00"},
             {"intent": "schedule_event", "example": "Schedule a meeting with Sam tomorrow at 10:00"},
             {"intent": "create_task", "example": "Create a task to review lecture notes tomorrow"},
+            {"intent": "send_email", "example": "Send mail to friend@example.com saying HI"},
+            {"intent": "daily_briefing", "example": "Give me my daily briefing"},
+            {"intent": "weekly_review", "example": "Review my week"},
+            {"intent": "find_free_time", "example": "Find a free 90-minute slot tomorrow"},
+            {"intent": "complete_task", "example": "Complete task review lecture notes"},
+            {"intent": "dismiss_reminder", "example": "Dismiss the reminder about course form"},
         ],
     }

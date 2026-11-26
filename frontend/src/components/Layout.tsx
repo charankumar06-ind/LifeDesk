@@ -7,9 +7,11 @@ import {
   Command,
   LayoutDashboard,
   ListChecks,
+  LogOut,
   Route,
   Search,
   Settings as SettingsIcon,
+  Zap,
   ShieldCheck,
   Sparkles,
 } from "lucide-react";
@@ -18,6 +20,7 @@ import { useApi } from "../lib/useApi";
 import { api } from "../lib/api";
 import { cn } from "../lib/cn";
 import { useSettings } from "./SettingsProvider";
+import { useAuth } from "./AuthProvider";
 import { initials } from "../lib/format";
 
 interface NavItem {
@@ -30,6 +33,7 @@ interface NavItem {
 const primaryNav: NavItem[] = [
   { to: "/", label: "Dashboard", icon: LayoutDashboard },
   { to: "/command", label: "Command Center", icon: Command },
+  { to: "/automations", label: "Automations", icon: Zap },
   { to: "/planner", label: "Daily Planner", icon: Route },
 ];
 
@@ -43,6 +47,7 @@ const secondaryNav: NavItem[] = [
 const routeLabels: Record<string, string> = {
   "/": "Dashboard",
   "/command": "Command Center",
+  "/automations": "Automations",
   "/planner": "Daily Planner",
   "/calendar": "Calendar",
   "/tasks": "Tasks",
@@ -115,8 +120,26 @@ function NavList({ items, pendingCount }: { items: NavItem[]; pendingCount: numb
 export default function Layout() {
   const location = useLocation();
   const { settings } = useSettings();
+  const { user, logout } = useAuth();
   const approvals = useApi(() => api.approvals(), [location.pathname]);
+  const system = useApi(() => api.system(), []);
   const pendingCount = approvals.data?.pending.length ?? 0;
+  const providerMode = system.data?.provider_mode ?? "local";
+  const mcpDegraded = providerMode === "mcp" && system.data?.mcp?.status === "error";
+  const modeLabel = mcpDegraded
+    ? "MCP Degraded — Calls Failing"
+    : providerMode === "mcp"
+      ? "MCP Mode — Connected"
+      : providerMode === "local-fallback"
+        ? "MCP fallback — Local Data"
+        : "Demo Mode — Local Data";
+  const modeDetail = mcpDegraded
+    ? "No local fallback · writes return 503 until an MCP call succeeds"
+    : providerMode === "mcp"
+      ? `${system.data?.mcp?.transport.toUpperCase() ?? "MCP"} provider · approval-gated writes`
+      : providerMode === "local-fallback"
+        ? "MCP unavailable · SQLite providers active"
+        : "SQLite providers · no MCP server connected";
 
   return (
     <div className="min-h-screen">
@@ -152,25 +175,35 @@ export default function Layout() {
             <div className="relative overflow-hidden rounded-xl border border-white/[0.09] bg-[linear-gradient(150deg,rgba(124,92,255,0.16),rgba(255,255,255,0.02))] px-3 py-3">
               <div className="flex items-center gap-2">
                 <span className="relative flex size-1.5">
-                  <span className="absolute inline-flex size-full animate-ping rounded-full bg-sage opacity-60" />
-                  <span className="relative inline-flex size-1.5 rounded-full bg-sage" />
+                  <span className={`absolute inline-flex size-full rounded-full opacity-60 ${mcpDegraded ? "bg-clay" : "animate-ping bg-sage"}`} />
+                  <span className={`relative inline-flex size-1.5 rounded-full ${mcpDegraded ? "bg-clay" : "bg-sage"}`} />
                 </span>
-                <span className="text-[11.5px] font-semibold text-bone-dim">Demo Mode — Local Data</span>
+                <span className="text-[11.5px] font-semibold text-bone-dim">{modeLabel}</span>
               </div>
-              <p className="mt-1.5 text-[10.5px] leading-relaxed text-muted">
-                SQLite providers · no MCP server connected
-              </p>
+              <p className="mt-1.5 text-[10.5px] leading-relaxed text-muted">{modeDetail}</p>
             </div>
 
             <div className="flex items-center gap-2.5 px-1 pt-1">
               <div className="flex size-8 items-center justify-center rounded-full border border-white/15 bg-[linear-gradient(140deg,#2a2748,#161528)] text-[10.5px] font-semibold text-bone-dim">
-                {initials(settings.display_name || "LifeDesk")}
+                {initials(settings.display_name || "Your profile")}
               </div>
               <div className="min-w-0">
-                <p className="truncate text-[12px] text-bone-dim">{settings.display_name}</p>
+                <p className="truncate text-[12px] text-bone-dim">
+                  {settings.display_name || "Your profile"}
+                </p>
                 <p className="truncate text-[10.5px] text-muted">{settings.workspace || "Personal desk"}</p>
               </div>
             </div>
+
+            <button
+              type="button"
+              onClick={() => void logout()}
+              className="flex w-full items-center gap-2 rounded-[10px] border border-transparent px-2.5 py-2 text-[12px] text-muted transition-colors hover:border-white/[0.07] hover:bg-white/[0.04] hover:text-bone-dim"
+            >
+              <LogOut className="size-3.5" />
+              Sign out
+              <span className="ml-auto truncate font-mono text-[10px] text-muted/70">@{user?.username ?? "owner"}</span>
+            </button>
           </div>
         </aside>
 
@@ -211,10 +244,12 @@ export default function Layout() {
 
               <div className="ml-1 flex items-center gap-2.5 rounded-[10px] border border-white/[0.08] bg-white/[0.035] py-1 pl-1 pr-3">
                 <div className="flex size-7 items-center justify-center rounded-lg bg-[linear-gradient(140deg,#3a3168,#1d1a35)] text-[10px] font-semibold text-bone">
-                  {initials(settings.display_name || "LifeDesk")}
+                  {initials(settings.display_name || "Your profile")}
                 </div>
                 <div className="leading-tight">
-                  <p className="text-[11.5px] font-medium text-bone-dim">{settings.display_name}</p>
+                  <p className="text-[11.5px] font-medium text-bone-dim">
+                    {settings.display_name || "Your profile"}
+                  </p>
                   <p className="text-[9.5px] text-muted">{settings.role || "Personal workspace"}</p>
                 </div>
               </div>
@@ -226,7 +261,7 @@ export default function Layout() {
               <Brand />
               <div className="flex items-center gap-2">
                 <span className="rounded-full border border-white/10 bg-white/[0.05] px-2 py-0.5 text-[10px] uppercase tracking-wide text-muted">
-                  Demo
+                  {mcpDegraded ? "MCP · degraded" : providerMode === "mcp" ? "MCP" : providerMode === "local-fallback" ? "Fallback" : "Demo"}
                 </span>
                 <NavLink
                   to="/settings"
@@ -235,6 +270,14 @@ export default function Layout() {
                 >
                   <SettingsIcon className="size-4" />
                 </NavLink>
+                <button
+                  type="button"
+                  onClick={() => void logout()}
+                  aria-label="Sign out"
+                  className="rounded-lg p-1.5 text-muted hover:bg-white/[0.07] hover:text-bone"
+                >
+                  <LogOut className="size-4" />
+                </button>
               </div>
             </div>
             <div className="flex gap-1 overflow-x-auto px-3 pb-2">

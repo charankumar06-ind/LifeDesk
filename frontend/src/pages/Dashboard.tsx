@@ -1,6 +1,7 @@
-import { useState } from "react";
+import { Fragment, useState } from "react";
 import { Link } from "react-router-dom";
 import {
+  ArrowRight,
   ArrowUpRight,
   Bell,
   CalendarDays,
@@ -58,14 +59,28 @@ function greeting(hour: number) {
   return "Good evening";
 }
 
-const LANES = [
-  { tone: "#9d8bff", y: 46, label: "Focus path" },
-  { tone: "#38bdf8", y: 132, label: "Meetings" },
-  { tone: "#4fd6a8", y: 194, label: "Open space" },
-] as const;
+type FlowStage = {
+  key: string;
+  label: string;
+  value: number;
+  caption: string;
+  note: string;
+  tone: string;
+};
 
-function DayFlow({
-  eventsToday,
+function eventMinutes(events: EventItem[], kind: string): number {
+  return events
+    .filter((event) => event.kind === kind)
+    .reduce(
+      (sum, event) =>
+        sum +
+        Math.max(0, Math.round((new Date(event.end_at).getTime() - new Date(event.start_at).getTime()) / 60000)),
+      0,
+    );
+}
+
+function StageFlow({
+  events,
   pendingTasks,
   pendingApprovals,
   completedToday,
@@ -74,7 +89,7 @@ function DayFlow({
   scheduledMinutes,
   freeMinutes,
 }: {
-  eventsToday: number;
+  events: EventItem[];
   pendingTasks: number;
   pendingApprovals: number;
   completedToday: number;
@@ -83,115 +98,100 @@ function DayFlow({
   scheduledMinutes: number;
   freeMinutes: number;
 }) {
-  const nodes = [
-    { label: "Intake", value: eventsToday, caption: "events today", height: 54 },
-    { label: "Plan", value: pendingTasks, caption: "open tasks", height: 92 },
-    { label: "Approve", value: pendingApprovals, caption: "awaiting you", height: 68 },
-    { label: "Execute", value: completedToday, caption: "done today", height: 44 },
-    { label: "Log", value: activityCount, caption: "entries", height: 60 },
+  const stages: FlowStage[] = [
+    { key: "intake", label: "Intake", value: events.length, caption: "events today", note: "What arrives", tone: "#38bdf8" },
+    { key: "plan", label: "Plan", value: pendingTasks, caption: "open tasks", note: "What is queued", tone: "#9d8bff" },
+    { key: "approve", label: "Approve", value: pendingApprovals, caption: "awaiting you", note: "Your call", tone: "#e0b25c" },
+    { key: "execute", label: "Execute", value: completedToday, caption: "done today", note: "Provider writes", tone: "#4fd6a8" },
+    { key: "log", label: "Log", value: activityCount, caption: "entries", note: "Audit trail", tone: "#a9a5c9" },
   ];
-  const xs = [76, 248, 420, 592, 764];
-  const top = 74;
+
   const total = scheduledMinutes + freeMinutes;
-  const focusPct = total > 0 ? Math.round((focusMinutes / total) * 100) : 0;
-  const bookedPct = total > 0 ? Math.round(((scheduledMinutes - focusMinutes) / total) * 100) : 0;
-  const openPct = Math.max(0, 100 - focusPct - bookedPct);
-  const legend = [focusPct, bookedPct, openPct];
+  const meetingMinutes = eventMinutes(events, "meeting");
+  const otherMinutes = Math.max(0, scheduledMinutes - focusMinutes - meetingMinutes);
+  const rawSegments = [
+    { label: "Focus", minutes: focusMinutes, tone: "#9d8bff" },
+    { label: "Meetings", minutes: meetingMinutes, tone: "#38bdf8" },
+    ...(otherMinutes > 0 ? [{ label: "Other", minutes: otherMinutes, tone: "#a9a5c9" }] : []),
+    { label: "Open", minutes: Math.max(0, freeMinutes), tone: "#4fd6a8" },
+  ];
+  let assigned = 0;
+  const segments = rawSegments.map((segment, index) => {
+    const pct =
+      index === rawSegments.length - 1
+        ? Math.max(0, 100 - assigned)
+        : Math.round(total > 0 ? (segment.minutes / total) * 100 : 0);
+    assigned += pct;
+    return { ...segment, pct };
+  });
 
   return (
     <div>
       <div className="overflow-x-auto">
-        <div className="relative min-w-[680px]">
-          <div
-            className="surface-grid pointer-events-none absolute inset-x-6 top-8 h-[150px] opacity-[0.35] [mask-image:linear-gradient(to_right,transparent,black_18%,black_82%,transparent)]"
-            aria-hidden
-          />
-          <svg viewBox="0 0 840 240" className="relative w-full" role="img" aria-label="Today's routing from intake to execution">
-            <defs>
-              <linearGradient id="flowBar" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0%" stopColor="#efeaff" />
-                <stop offset="35%" stopColor="#b9a8ff" stopOpacity="0.9" />
-                <stop offset="80%" stopColor="#8b7cff" stopOpacity="0.4" />
-                <stop offset="100%" stopColor="#8b7cff" stopOpacity="0" />
-              </linearGradient>
-              <filter id="flowGlow" x="-40%" y="-60%" width="180%" height="220%">
-                <feGaussianBlur stdDeviation="4" />
-              </filter>
-            </defs>
-
-            {LANES.map((lane, laneIndex) => (
-              <g key={lane.tone}>
-                {xs.slice(0, -1).map((x, index) => {
-                  const next = xs[index + 1];
-                  const d = `M ${x} ${top} C ${x + 46} ${lane.y}, ${next - 46} ${lane.y}, ${next} ${top}`;
-                  return (
-                    <path
-                      key={`${lane.tone}-${index}`}
-                      d={d}
-                      fill="none"
-                      stroke={lane.tone}
-                      strokeWidth={laneIndex === 0 ? 2.4 : 1.6}
-                      strokeLinecap="round"
-                      opacity={0.5}
-                      filter="url(#flowGlow)"
-                    />
-                  );
-                })}
-                {xs.slice(0, -1).map((x, index) => {
-                  const next = xs[index + 1];
-                  const d = `M ${x} ${top} C ${x + 46} ${lane.y}, ${next - 46} ${lane.y}, ${next} ${top}`;
-                  return (
-                    <path
-                      key={`${lane.tone}-solid-${index}`}
-                      d={d}
-                      fill="none"
-                      stroke={lane.tone}
-                      strokeWidth={laneIndex === 0 ? 1.7 : 1.1}
-                      strokeLinecap="round"
-                      opacity={laneIndex === 0 ? 0.85 : 0.45}
-                      className={laneIndex === 0 ? "flow-line" : undefined}
-                    />
-                  );
-                })}
-              </g>
-            ))}
-
-            {nodes.map((node, index) => (
-              <g key={node.label}>
-                <text x={xs[index]} y={52} textAnchor="middle" className="fill-[#cfcde4]" fontSize="11.5" fontWeight="600">
-                  {node.label}
-                </text>
-                <rect
-                  x={xs[index] - 3.5}
-                  y={top}
-                  width={7}
-                  height={node.height}
-                  rx={3.5}
-                  fill="url(#flowBar)"
-                />
-                <circle cx={xs[index]} cy={top} r={12} fill="#8b7cff" opacity={0.3} filter="url(#flowGlow)" />
-                <circle cx={xs[index]} cy={top} r={4.8} fill="#0d0d1c" stroke="#ded6ff" strokeWidth={1.8} />
-                <text x={xs[index]} y={top + node.height + 24} textAnchor="middle" className="fill-[#f4f3fb]" fontSize="17" fontWeight="600">
-                  {node.value}
-                </text>
-                <text x={xs[index]} y={top + node.height + 40} textAnchor="middle" className="fill-[#8e8cab]" fontSize="10">
-                  {node.caption}
-                </text>
-              </g>
-            ))}
-          </svg>
+        <div className="flex min-w-[820px] items-stretch gap-1.5 px-5 py-5">
+          {stages.map((stage, index) => {
+            const active = stage.key === "approve" && pendingApprovals > 0;
+            return (
+              <Fragment key={stage.key}>
+                <div
+                  className={cn(
+                    "relative flex-1 overflow-hidden rounded-xl border px-3.5 py-3",
+                    active
+                      ? "border-brass/40 bg-brass/[0.07]"
+                      : "border-white/[0.07] bg-white/[0.02]",
+                  )}
+                >
+                  <span
+                    className="absolute inset-x-3 top-0 h-px"
+                    style={{ background: `linear-gradient(90deg, transparent, ${stage.tone}, transparent)` }}
+                    aria-hidden
+                  />
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="label-micro">{stage.label}</span>
+                    <span className="num font-mono text-[10px] text-muted/60">
+                      {String(index + 1).padStart(2, "0")}
+                    </span>
+                  </div>
+                  <div className="num mt-2.5 text-[28px] font-semibold leading-none" style={{ color: stage.tone }}>
+                    {stage.value}
+                  </div>
+                  <div className="mt-1.5 text-[10.5px] text-muted">{stage.caption}</div>
+                  <div className="mt-2 text-[9.5px] uppercase tracking-wide text-muted/60">{stage.note}</div>
+                </div>
+                {index < stages.length - 1 && (
+                  <ArrowRight className="size-4 shrink-0 self-center text-white/20" aria-hidden />
+                )}
+              </Fragment>
+            );
+          })}
         </div>
       </div>
 
-      <div className="flex flex-wrap items-center gap-x-5 gap-y-2 border-t border-white/[0.06] px-5 py-3">
-        {LANES.map((lane, index) => (
-          <span key={lane.label} className="inline-flex items-center gap-2 text-[11.5px] text-muted">
-            <span className="h-[2px] w-5 rounded-full" style={{ backgroundColor: lane.tone }} aria-hidden />
-            {lane.label}
-            <span className="num font-semibold text-bone-dim">{legend[index]}%</span>
+      <div className="border-t border-white/[0.06] px-5 py-3">
+        <div className="flex h-1.5 overflow-hidden rounded-full bg-white/[0.06]" aria-hidden>
+          {segments.map((segment) =>
+            segment.pct > 0 ? (
+              <div
+                key={segment.label}
+                className="h-full"
+                style={{ width: `${segment.pct}%`, backgroundColor: segment.tone }}
+              />
+            ) : null,
+          )}
+        </div>
+        <div className="mt-2.5 flex flex-wrap items-center gap-x-5 gap-y-2">
+          {segments.map((segment) => (
+            <span key={segment.label} className="inline-flex items-center gap-2 text-[11.5px] text-muted">
+              <span className="size-1.5 rounded-full" style={{ backgroundColor: segment.tone }} aria-hidden />
+              {segment.label}
+              <span className="num font-semibold text-bone-dim">{segment.pct}%</span>
+              <span className="num text-[10.5px] text-muted/70">{durationLabel(segment.minutes)}</span>
+            </span>
+          ))}
+          <span className="ml-auto text-[10.5px] text-muted/80">
+            Share of today's working window · {durationLabel(Math.max(0, total))}
           </span>
-        ))}
-        <span className="ml-auto text-[10.5px] text-muted/80">Share of today's working window</span>
+        </div>
       </div>
     </div>
   );
@@ -223,12 +223,17 @@ function ScheduleRow({ event, format }: { event: EventItem; format: "12h" | "24h
 
 export default function Dashboard() {
   const { data, loading, error, reload } = useApi(() => api.dashboard(), []);
+  const systemApi = useApi(() => api.system(), []);
+  const system = systemApi.data;
+  const providerMode = system?.provider_mode ?? "local";
+  const mcpDegraded = providerMode === "mcp" && system?.mcp?.status === "error";
   const { settings } = useSettings();
   const toast = useToast();
   const [busyTask, setBusyTask] = useState<string | null>(null);
 
   const format = settings.time_format;
   const today = todayISO();
+  const profileFirst = settings.display_name.trim().split(/\s+/)[0] ?? "";
   const pendingApprovals = data?.pending_approvals ?? 0;
   const stats = data?.stats;
 
@@ -261,7 +266,7 @@ export default function Dashboard() {
     <div>
       <PageHeader
         eyebrow={fmtDate(today, { weekday: "long", day: "numeric", month: "long" })}
-        title={`${greeting(new Date().getHours())}, ${(data?.settings.display_name ?? settings.display_name).split(" ")[0]}.`}
+        title={`${greeting(new Date().getHours())}${profileFirst ? `, ${profileFirst}.` : "."}`}
         description="Your day at a glance — schedule, pending work, and what the workflow engine has been doing."
         actions={
           <>
@@ -372,8 +377,8 @@ export default function Dashboard() {
                 </Badge>
               }
             />
-            <DayFlow
-              eventsToday={data.events_today.length}
+            <StageFlow
+              events={data.events_today}
               pendingTasks={stats.pending_count}
               pendingApprovals={pendingApprovals}
               completedToday={stats.completed_today}
@@ -599,13 +604,18 @@ export default function Dashboard() {
               <Card className="px-5 py-4">
                 <div className="flex items-center justify-between">
                   <span className="label-micro">Provider mode</span>
-                  <Badge tone="sage" dot>
-                    Local · SQLite
+                  <Badge tone={providerMode === "mcp" ? "sky" : providerMode === "local-fallback" ? "brass" : "sage"} dot>
+                    {providerMode === "mcp" ? "MCP" : providerMode === "local-fallback" ? "Fallback" : "Local · SQLite"}
                   </Badge>
                 </div>
                 <p className="mt-2 text-[11.5px] leading-relaxed text-muted">
-                  Calendar, task and reminder tools are local providers behind the same interfaces MCP
-                  servers will implement. Demo Mode — Local Data.
+                  {mcpDegraded
+                    ? "The last MCP call failed, so this provider is degraded. Writes return 503 rather than falling back to local storage; the next successful call restores health."
+                    : providerMode === "mcp"
+                      ? `Calendar, task and reminder tools call the configured ${system?.mcp?.transport ?? "MCP"} MCP server. Approval still gates every write.`
+                      : providerMode === "local-fallback"
+                      ? "MCP was unavailable at startup, so SQLite providers are active. No workflow writes were routed to MCP."
+                      : "Calendar, task and reminder tools are local providers behind the same interfaces MCP servers implement. Demo Mode — Local Data."}
                 </p>
                 <Link to="/settings" className="mt-2 inline-flex items-center gap-1 text-[11.5px] text-brass hover:underline">
                   Integration status <ArrowUpRight className="size-3" />
@@ -615,8 +625,8 @@ export default function Dashboard() {
           </div>
 
           <div className="flex flex-wrap items-center gap-2 pt-1 text-[11px] text-muted">
-            <StatusBadge status="connected" />
-            <span>Local providers connected</span>
+            <StatusBadge status={mcpDegraded ? "error" : providerMode === "local-fallback" ? "fallback" : "connected"} />
+            <span>{mcpDegraded ? "MCP providers degraded · no local fallback" : providerMode === "mcp" ? "MCP providers connected" : providerMode === "local-fallback" ? "Local fallback providers connected" : "Local providers connected"}</span>
             <span className="text-line">·</span>
             <span>{data.completed_today.length} task(s) completed today</span>
             <span className="text-line">·</span>

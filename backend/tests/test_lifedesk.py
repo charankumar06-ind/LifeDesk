@@ -218,6 +218,58 @@ def test_study_session_command(client):
     assert events[0]["kind"] == "study"
 
 
+def test_email_command_is_proposed_and_local_mode_refuses_to_send(client):
+    workflow = client.post(
+        "/api/commands",
+        json={"command": "Send mail to vishnuvardhan7219@gmail.com saying HI"},
+    ).json()
+
+    assert workflow["intent"] == "send_email"
+    assert workflow["status"] == "pending_approval"
+    action = workflow["actions"][0]
+    assert action["action_type"] == "send_email"
+    assert action["provider"] == "mail"
+    assert action["payload"] == {
+        "to": ["vishnuvardhan7219@gmail.com"],
+        "subject": "HI",
+        "body": "HI",
+    }
+    assert action["preview"]["entity"] == "email"
+    assert action["status"] == "proposed"
+
+    # Approval alone sends nothing.
+    activity = client.get("/api/activity").json()["entries"]
+    assert not any(entry["operation"] == "send_email" for entry in activity)
+
+    approved = client.post(f"/api/approvals/{workflow['id']}/decision", json={"decision": "approve"})
+    assert approved.status_code == 200
+    executed = client.post(f"/api/approvals/{workflow['id']}/execute")
+    assert executed.status_code == 200, executed.text
+    body = executed.json()
+
+    # Local mode is honest: it reports a failure instead of simulated delivery.
+    assert body["status"] == "failed"
+    assert "Local mode cannot send email" in body["actions"][0]["error"]
+    activity = client.get("/api/activity").json()["entries"]
+    assert any(
+        entry["operation"] == "send_email" and entry["status"] == "failed" for entry in activity
+    )
+
+
+def test_email_subject_and_body_are_parsed():
+    from app.services.intent import parse_command
+
+    result = parse_command("Email team@example.com about launch update saying we ship on Friday")
+    assert result.intent == "send_email"
+    assert result.entities["to"] == ["team@example.com"]
+    assert result.entities["subject"] == "launch update"
+    assert result.entities["body"] == "we ship on Friday"
+
+    simple = parse_command("send mail to vishnuvardhan7219@gmail.com saying HI")
+    assert simple.entities["subject"] == "HI"
+    assert simple.entities["body"] == "HI"
+
+
 def test_unsupported_command_logs_failed_attempt(client):
     workflow = client.post("/api/commands", json={"command": "Book a flight to Tokyo"}).json()
     assert workflow["status"] == "failed"
@@ -277,6 +329,156 @@ def test_dashboard_aggregates_local_data(client):
     assert len(dashboard["events_today"]) == 1
     assert dashboard["settings"]["time_format"] in {"12h", "24h"}
     assert len(dashboard["stats"]["weekly_completions"]) == 7
+
+
+def test_new_automation_intents_parse():
+    from app.services.intent import parse_command
+
+    briefing = parse_command("Give me my daily briefing")
+    assert briefing.intent == "daily_briefing"
+    assert briefing.supported is True
+
+    weekly = parse_command("Review my week")
+    assert weekly.intent == "weekly_review"
+
+    free = parse_command("Find a free 90-minute slot tomorrow")
+    assert free.intent == "find_free_time"
+    assert free.entities["minutes"] == 90
+
+    complete = parse_command("Complete task review lecture notes")
+    assert complete.intent == "complete_task"
+    assert "lecture notes" in complete.entities["title"].lower()
+
+    dismiss = parse_command("Dismiss the reminder about course form")
+    assert dismiss.intent == "dismiss_reminder"
+    assert "course form" in dismiss.entities["title"].lower()
+
+
+def test_automation_catalog_reports_readiness(client):
+    body = client.get("/api/automations").json()
+    summary = body["summary"]
+    assert summary["total"] == len(body["items"]) == 16
+    assert summary["planned"] == 4
+    assert summary["ready"] >= 9
+    assert summary["working_percentage"] >= 60
+    assert summary["working_percentage"] == round(summary["ready"] / summary["total"] * 100)
+
+    statuses = {item["id"]: item["status"] for item in body["items"]}
+    assert statuses["plan_day"] == "ready"
+    assert statuses["daily_briefing"] == "ready"
+    assert statuses["complete_task"] == "ready"
+    assert statuses["send_email"] == "needs_setup"
+    assert statuses["web_research"] == "planned"
+    assert body["provider_mode"] == "local"
+    assert all("example" in item and item["example"] for item in body["items"])
+
+
+def test_daily_briefing_is_read_only(client):
+    _create_task(client, title="Briefing task", due=_iso(0, 23, 0))
+    _create_event(client, start=_iso(0, 14, 0), end=_iso(0, 15, 0))
+    reminder = client.post(
+        "/api/commands", json={"command": "Remind me to call the dentist at 18:00"}
+    ).json()
+    client.post(f"/api/approvals/{reminder['id']}/decision", json={"decision": "approve"})
+    assert client.post(f"/api/approvals/{reminder['id']}/execute").status_code == 200
+
+    workflow = client.post("/api/commands", json={"command": "Give me my daily briefing"}).json()
+    assert workflow["intent"] == "daily_briefing"
+    assert workflow["status"] == "completed"
+    assert workflow["actions"] == []
+    assert workflow["result"]["counts"]["events"] == 1
+    assert workflow["result"]["counts"]["open_tasks"] == 1
+    assert workflow["result"]["counts"]["pending_reminders"] == 1
+    assert workflow["result"]["next_event"]["title"] == "Research methods lecture"
+    assert any(
+        entry["operation"] == "daily_briefing" and entry["status"] == "success"
+        for entry in client.get("/api/activity").json()["entries"]
+    )
+
+
+def test_find_free_time_returns_gaps(client):
+    _create_event(
+        client,
+        title="Tomorrow workshop",
+        start=_iso(1, 10, 0),
+        end=_iso(1, 11, 0),
+    )
+    workflow = client.post(
+        "/api/commands", json={"command": "Find a free 90-minute slot tomorrow"}
+    ).json()
+    assert workflow["intent"] == "find_free_time"
+    assert workflow["status"] == "completed"
+    assert workflow["actions"] == []
+    assert workflow["result"]["required_minutes"] == 90
+    assert workflow["result"]["count"] >= 1
+    assert any(gap["minutes"] >= 90 for gap in workflow["result"]["gaps"])
+
+
+def test_complete_task_flow(client):
+    task = _create_task(client, title="Review lecture notes")
+    workflow = client.post(
+        "/api/commands", json={"command": "Complete task review lecture notes"}
+    ).json()
+    assert workflow["intent"] == "complete_task"
+    assert workflow["status"] == "pending_approval"
+    action = workflow["actions"][0]
+    assert action["action_type"] == "complete_task"
+    assert action["payload"]["task_id"] == task["id"]
+    assert action["payload"]["update"] == {"status": "done"}
+
+    client.post(f"/api/approvals/{workflow['id']}/decision", json={"decision": "approve"})
+    executed = client.post(f"/api/approvals/{workflow['id']}/execute")
+    assert executed.status_code == 200
+    assert executed.json()["status"] == "completed"
+    updated = client.get("/api/tasks", params={"search": "review lecture notes"}).json()["tasks"][0]
+    assert updated["status"] == "done"
+    assert updated["completed_at"] is not None
+
+
+def test_complete_task_reports_missing_match(client):
+    workflow = client.post(
+        "/api/commands", json={"command": "Complete task does not exist"}
+    ).json()
+    assert workflow["intent"] == "complete_task"
+    assert workflow["status"] == "failed"
+    assert workflow["actions"] == []
+    assert "No open task matches" in workflow["error"]
+
+
+def test_dismiss_reminder_flow(client):
+    created = client.post(
+        "/api/commands", json={"command": "Remind me to submit the course form at 17:00"}
+    ).json()
+    client.post(f"/api/approvals/{created['id']}/decision", json={"decision": "approve"})
+    client.post(f"/api/approvals/{created['id']}/execute")
+
+    workflow = client.post(
+        "/api/commands", json={"command": "Dismiss the reminder about course form"}
+    ).json()
+    assert workflow["intent"] == "dismiss_reminder"
+    assert workflow["status"] == "pending_approval"
+    action = workflow["actions"][0]
+    assert action["action_type"] == "dismiss_reminder"
+
+    client.post(f"/api/approvals/{workflow['id']}/decision", json={"decision": "approve"})
+    executed = client.post(f"/api/approvals/{workflow['id']}/execute")
+    assert executed.status_code == 200
+    assert executed.json()["status"] == "completed"
+    assert client.get("/api/reminders", params={"status": "pending"}).json()["reminders"] == []
+    dismissed = client.get("/api/reminders", params={"status": "dismissed"}).json()["reminders"]
+    assert len(dismissed) == 1
+
+
+def test_weekly_review_counts_completions(client):
+    _create_task(client, title="Finished this week", status="done")
+    _create_task(client, title="Still open")
+    workflow = client.post("/api/commands", json={"command": "Review my week"}).json()
+    assert workflow["intent"] == "weekly_review"
+    assert workflow["status"] == "completed"
+    assert workflow["actions"] == []
+    assert workflow["result"]["counts"]["tasks_completed"] == 1
+    assert workflow["result"]["counts"]["open_tasks"] == 1
+    assert len(workflow["result"]["daily_completions"]) == 7
 
 
 def test_planner_does_not_duplicate_an_executed_focus_block(client):

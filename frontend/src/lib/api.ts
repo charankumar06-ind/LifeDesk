@@ -1,5 +1,7 @@
 import type {
   ActivityResponse,
+  AuthStatus,
+  AutomationCatalog,
   DashboardData,
   DayPlan,
   EventItem,
@@ -38,6 +40,9 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
   }
 
   if (!response.ok) {
+    if (response.status === 401 && !path.startsWith("/auth/")) {
+      window.dispatchEvent(new Event("lifedesk:unauthorized"));
+    }
     let message = `Request failed (${response.status}).`;
     try {
       const body = await response.json();
@@ -67,6 +72,19 @@ function query(params: Record<string, string | number | null | undefined>): stri
 }
 
 export const api = {
+  authStatus: () => request<AuthStatus>("/auth/status"),
+  login: (username: string, password: string) =>
+    request<AuthStatus>("/auth/login", {
+      method: "POST",
+      body: JSON.stringify({ username, password }),
+    }),
+  setup: (displayName: string, username: string, password: string) =>
+    request<AuthStatus>("/auth/setup", {
+      method: "POST",
+      body: JSON.stringify({ display_name: displayName, username, password }),
+    }),
+  logout: () => request<{ ok: boolean }>("/auth/logout", { method: "POST" }),
+
   dashboard: () => request<DashboardData>("/dashboard"),
 
   tasks: (params: { status?: string; priority?: string; search?: string } = {}) =>
@@ -121,6 +139,7 @@ export const api = {
   saveSettings: (payload: Settings) =>
     request<Settings>("/settings", { method: "PUT", body: JSON.stringify(payload) }),
   system: () => request<SystemStatus>("/system"),
+  automations: () => request<AutomationCatalog>("/automations"),
 };
 
 export type { DayPlan };

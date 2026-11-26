@@ -6,6 +6,7 @@ which is what keeps the workflow engine and UI unchanged when providers swap.
 
 from __future__ import annotations
 
+import re
 from datetime import datetime
 from typing import Any, Literal
 
@@ -142,6 +143,36 @@ class ReminderCreate(BaseModel):
     title: str = Field(min_length=1, max_length=140)
     note: str = Field(default="", max_length=1000)
     remind_at: datetime
+
+
+class EmailMessage(BaseModel):
+    """One outbound email. Recipients are validated before any provider is called."""
+
+    to: list[str] = Field(min_length=1, max_length=10)
+    subject: str = Field(min_length=1, max_length=200)
+    body: str = Field(min_length=1, max_length=20000)
+
+    @field_validator("to")
+    @classmethod
+    def _clean_recipients(cls, value: list[str]) -> list[str]:
+        cleaned: list[str] = []
+        for item in value:
+            address = item.strip()
+            if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", address):
+                raise ValueError(f"'{item}' is not a valid email address")
+            if address not in cleaned:
+                cleaned.append(address)
+        if not cleaned:
+            raise ValueError("At least one recipient is required")
+        return cleaned
+
+    @field_validator("subject", "body")
+    @classmethod
+    def _strip_text(cls, value: str) -> str:
+        value = value.strip()
+        if not value:
+            raise ValueError("Subject and body cannot be empty")
+        return value
 
 
 class WorkflowAction(BaseModel):

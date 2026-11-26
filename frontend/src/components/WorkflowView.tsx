@@ -9,6 +9,7 @@ import {
   Clock,
   Cpu,
   ListPlus,
+  Mail,
   Minus,
   Play,
   ShieldCheck,
@@ -52,6 +53,7 @@ function actionIcon(type: string) {
   if (type === "create_event") return <CalendarPlus className="size-4" />;
   if (type === "create_task") return <ListPlus className="size-4" />;
   if (type === "create_reminder") return <BellPlus className="size-4" />;
+  if (type === "send_email") return <Mail className="size-4" />;
   return <Zap className="size-4" />;
 }
 
@@ -357,7 +359,9 @@ export default function WorkflowView({
                       <span className="font-mono text-[10px] uppercase tracking-wide text-muted/80">
                         {action.provider} · {action.action_type}
                       </span>
-                      <SimulationChip />
+                      {workflow.plan.providers?.find((provider) =>
+                        provider.key.includes(action.provider),
+                      )?.kind === "local" && <SimulationChip />}
                       {action.executed_at && (
                         <span className="text-[10.5px] text-muted">
                           executed {fmtDateTime(action.executed_at, format)}

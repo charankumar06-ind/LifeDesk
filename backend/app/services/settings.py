@@ -12,7 +12,7 @@ from ..db import get_db
 HHMM = re.compile(r"^([01]\d|2[0-3]):([0-5]\d)$")
 
 DEFAULT_SETTINGS: dict[str, object] = {
-    "display_name": "Ari Mensah",
+    "display_name": "Ari Mensha",
     "role": "Computer science student",
     "workspace": "Personal desk",
     "time_format": "24h",
@@ -77,6 +77,51 @@ def get_settings() -> dict[str, object]:
         rows = conn.execute("SELECT key, value FROM settings").fetchall()
     values = {row["key"]: row["value"] for row in rows}
     return _coerce(DEFAULT_SETTINGS, values)
+
+
+def set_display_name(value: str) -> str:
+    """Set the profile name during account setup (before the full form exists)."""
+    clean = (value or "").strip()
+    if not clean:
+        raise ValueError("Profile name cannot be empty")
+    if len(clean) > 60:
+        raise ValueError("Profile name must be 60 characters or fewer")
+    with get_db() as conn:
+        conn.execute(
+            "INSERT INTO settings (key, value) VALUES ('display_name', ?)"
+            " ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+            (clean,),
+        )
+    return clean
+
+
+PROFILE_NAME_MIGRATION_KEY = "profile_name_migrated_v1"
+
+
+def migrate_seeded_profile_name() -> None:
+    """One-time correction of the old demo placeholder to "Ari Mensha".
+
+    The migration runs once per database. It only touches the exact seeded
+    value, so a name the owner later chooses is never overwritten—including a
+    deliberate "Ari Mensah".
+    """
+    with get_db() as conn:
+        done = conn.execute(
+            "SELECT 1 FROM meta WHERE key = ?", (PROFILE_NAME_MIGRATION_KEY,)
+        ).fetchone()
+        if done:
+            return
+        row = conn.execute(
+            "SELECT value FROM settings WHERE key = 'display_name'"
+        ).fetchone()
+        if row is not None and row["value"] == "Ari Mensah":
+            conn.execute(
+                "UPDATE settings SET value = 'Ari Mensha' WHERE key = 'display_name'"
+            )
+        conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES (?, ?)",
+            (PROFILE_NAME_MIGRATION_KEY, "done"),
+        )
 
 
 def update_settings(payload: SettingsUpdate) -> dict[str, object]:

@@ -27,7 +27,7 @@ const STATUS_FILTERS = [
   { key: "failed", label: "Failed" },
 ];
 
-const PROVIDERS = ["calendar", "task", "reminder", "workflow", "ai"];
+const PROVIDERS = ["calendar", "task", "reminder", "mail", "workflow", "ai"];
 
 const rowAccent: Record<string, string> = {
   success: "border-l-sage/50",
@@ -68,6 +68,9 @@ export default function ActivityPage() {
       }),
     [status, provider],
   );
+  const systemApi = useApi(() => api.system(), []);
+  const system = systemApi.data;
+  const providerMode = system?.provider_mode ?? "local";
 
   const data = activityApi.data;
   const entries = data?.entries ?? [];
@@ -78,7 +81,13 @@ export default function ActivityPage() {
       <PageHeader
         eyebrow="Activity Monitor"
         title="Every tool call, on the record."
-        description="Workflow executions and provider operations with their result. Local simulated calls are labelled — no MCP server is connected in this build."
+        description={
+          providerMode === "mcp"
+            ? `Workflow executions and provider operations with their result. Calls are executing through ${system?.mcp?.transport ?? "MCP"} to ${system?.mcp?.endpoint ?? "the configured MCP server"}.`
+            : providerMode === "local-fallback"
+              ? "Workflow executions and provider operations with their result. MCP was unavailable at startup, so local SQLite providers are active."
+              : "Workflow executions and provider operations with their result. Local simulated calls are labelled; no MCP server is connected."
+        }
         actions={
           <Button size="sm" variant="secondary" onClick={activityApi.reload}>
             Refresh
@@ -207,11 +216,15 @@ export default function ActivityPage() {
       </Card>
 
       <div className="mt-3 flex flex-wrap items-center gap-2 text-[11px] text-muted">
-        <Badge tone="outline">Demo Mode — Local Data</Badge>
+        <Badge tone={providerMode === "mcp" ? "sky" : providerMode === "local-fallback" ? "brass" : "outline"}>
+          {system?.demo_label ?? "Demo Mode — Local Data"}
+        </Badge>
         <span>
-          Provider names such as <span className="font-mono">local-calendar</span> are SQLite adapters.
-          When MCP servers are connected, this log will show the real server names and transport, with
-          the simulation chips removed.
+          {providerMode === "mcp"
+            ? `Provider calls use the MCP tool contract over ${system?.mcp?.transport ?? "MCP"}. Approval decisions remain local workflow records.`
+            : providerMode === "local-fallback"
+              ? "MCP startup failed; provider names such as local-calendar are SQLite adapters and no writes were routed to MCP."
+              : "Provider names such as local-calendar are SQLite adapters. Simulation chips mark local calls."}
         </span>
       </div>
     </div>

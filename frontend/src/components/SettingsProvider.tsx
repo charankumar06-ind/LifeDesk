@@ -3,7 +3,7 @@ import { api } from "../lib/api";
 import type { Settings } from "../lib/types";
 
 const fallback: Settings = {
-  display_name: "There",
+  display_name: "",
   role: "",
   workspace: "Personal desk",
   time_format: "24h",

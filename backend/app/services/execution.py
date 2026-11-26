@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Any, Literal
 
 from ..db import get_db
-from ..domain import EventCreate, ReminderCreate, TaskCreate, Workflow
+from ..domain import EmailMessage, EventCreate, ReminderCreate, TaskCreate, TaskUpdate, Workflow
 from ..providers.base import ProviderInfo
 from ..providers.registry import get_services
 from ..utils import dumps, fmt_time, iso, new_id, now
@@ -25,6 +25,7 @@ _PROVIDER_INFO = {
     "calendar": lambda: get_services().calendar.info,
     "task": lambda: get_services().tasks.info,
     "reminder": lambda: get_services().reminders.info,
+    "mail": lambda: get_services().mail.info,
 }
 
 
@@ -185,9 +186,19 @@ def perform_action(action: dict[str, Any]) -> tuple[dict[str, Any], str]:
             {"reminder_id": reminder.id, "reminder": reminder.model_dump(mode="json")},
             f"Created reminder '{reminder.title}' for {reminder.remind_at.strftime('%d %b %H:%M')}.",
         )
+    if action["action_type"] == "send_email":
+        result = services.mail.send_email(EmailMessage(**payload))
+        recipients = ", ".join(result.get("to") or [])
+        return (result, f"Sent email '{result.get('subject', '')}' to {recipients}.")
     if action["action_type"] == "complete_task":
-        task = services.tasks.update_task(payload["task_id"], payload["update"])
+        task = services.tasks.update_task(payload["task_id"], TaskUpdate(**payload["update"]))
         return ({"task_id": task.id}, f"Marked task '{task.title}' as {task.status}.")
+    if action["action_type"] == "dismiss_reminder":
+        reminder = services.reminders.dismiss_reminder(payload["reminder_id"])
+        return (
+            {"reminder_id": reminder.id, "reminder": reminder.model_dump(mode="json")},
+            f"Dismissed reminder '{reminder.title}'.",
+        )
     raise WorkflowError(f"Unsupported action type '{action['action_type']}'.", 500)
 
 

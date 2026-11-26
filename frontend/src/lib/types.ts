@@ -2,6 +2,19 @@ export type Priority = "low" | "medium" | "high" | "urgent";
 export type TaskStatus = "todo" | "in_progress" | "done";
 export type EventKind = "meeting" | "focus" | "study" | "personal" | "break";
 
+export interface AuthUser {
+  id: string;
+  username: string;
+  created_at: string;
+}
+
+export interface AuthStatus {
+  configured: boolean;
+  authenticated: boolean;
+  user: AuthUser | null;
+  session_days: number;
+}
+
 export interface Task {
   id: string;
   title: string;
@@ -228,6 +241,22 @@ export interface ProviderInfo {
   note: string;
 }
 
+export interface McpStatus {
+  requested: boolean;
+  configured: boolean;
+  transport: string;
+  endpoint: string;
+  status: string;
+  fallback_active: boolean;
+  fallback_mode: string;
+  error: string | null;
+  tools: string[];
+  required_tools: string[];
+  mail_available: boolean;
+  mail_configured: boolean | null;
+  checked_at: string | null;
+}
+
 export interface SystemStatus {
   app: string;
   version: string;
@@ -235,6 +264,7 @@ export interface SystemStatus {
   demo_label: string;
   provider_mode: string;
   providers: ProviderInfo[];
+  mcp: McpStatus;
   ai: {
     mode: string;
     label: string;
@@ -267,6 +297,36 @@ export interface PlannerResponse {
   plan: DayPlan;
   pending_tasks: Task[];
   window: { start: string; end: string; buffer_minutes: number };
+}
+
+export type AutomationStatus = "ready" | "needs_setup" | "planned" | "degraded";
+
+export interface AutomationItem {
+  id: string;
+  title: string;
+  description: string;
+  category: string;
+  example: string;
+  action: "read" | "write";
+  capability: string;
+  planned: boolean;
+  status: AutomationStatus;
+  status_detail: string;
+}
+
+export interface AutomationCatalog {
+  items: AutomationItem[];
+  summary: {
+    total: number;
+    ready: number;
+    needs_setup: number;
+    planned: number;
+    degraded: number;
+    implemented: number;
+    working_percentage: number;
+    implemented_percentage: number;
+  };
+  provider_mode: string;
 }
 
 export interface ActivityResponse {
